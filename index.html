@@ -65,9 +65,9 @@
     function createBeams() {
       // Create three brutalist beams
       const beamWidth = 0.15;
-      const beamHeight = 0.5;
+      const beamHeight = 0.8; // Taller beams
       const beamDepth = 0.15;
-      const spacing = 0.3;
+      const spacing = 0.4; // Wider spacing
       
       const beamGeometry = new THREE.BoxGeometry(beamWidth, beamHeight, beamDepth);
       
@@ -103,7 +103,7 @@
         const beam = new THREE.Mesh(beamGeometry, materials);
         
         // Position beams in a row
-        beam.position.set((i-1) * spacing, 0, -0.7);
+        beam.position.set((i-1) * spacing, 0, -1.2); // Further away from user
         
         // Rotate each beam so an edge faces the user
         beam.rotation.y = Math.PI/4; // 45 degrees
@@ -150,13 +150,19 @@
       // Check intersections with beams
       const intersects = raycaster.intersectObjects(beams);
       
-      // Reset all beams first
+      // Reset non-intersected beams
       beams.forEach(beam => {
         if (beam.userData.highlighted && (!intersects.length || intersects[0].object !== beam)) {
           // Reset beam
           beam.userData.highlighted = false;
           animateBeam(beam, false);
-          videos[beam.userData.index].pause();
+          
+          // Fade out video (pause after a short delay)
+          if (videos[beam.userData.index].currentTime > 0) {
+            setTimeout(() => {
+              videos[beam.userData.index].pause();
+            }, 300);
+          }
         }
       });
       
@@ -168,33 +174,88 @@
         if (!beam.userData.highlighted) {
           beam.userData.highlighted = true;
           animateBeam(beam, true);
-          videos[beam.userData.index].play();
+          
+          // Ensure video plays and is at beginning if it wasn't playing
+          const video = videos[beam.userData.index];
+          if (video.paused) {
+            video.currentTime = 0;
+            const playPromise = video.play();
+            
+            // Handle play promise to catch autoplay restrictions
+            if (playPromise !== undefined) {
+              playPromise.catch(error => {
+                // Auto-play was prevented, show a UI element to let the user manually start playback
+                console.log('Video autoplay prevented:', error);
+                show('Tap to enable videos');
+                
+                // Set up a one-time click handler to start videos on user interaction
+                if (!window.videoInteractionSet) {
+                  window.videoInteractionSet = true;
+                  document.addEventListener('click', () => {
+                    videos.forEach(v => {
+                      if (v.paused) v.play().catch(() => {});
+                    });
+                  }, { once: true });
+                }
+              });
+            }
+          }
         }
       } else {
         highlightedBeam = null;
       }
     }
     
+    // Track animation and transitions
+    let animatingBeams = new Set();
+    let lastTime = 0;
+    
     function animateBeam(beam, highlight) {
-      if (highlight) {
-        // Grow beam toward user and expand size
-        const growFactor = 1.3;
-        beam.scale.set(
-          beam.userData.originalScale.x * growFactor,
-          beam.userData.originalScale.y * growFactor,
-          beam.userData.originalScale.z * growFactor
-        );
+      animatingBeams.add(beam.userData.index);
+      
+      // Store target values
+      beam.userData.targetScale = highlight ? 
+        new THREE.Vector3(
+          beam.userData.originalScale.x * 1.5,
+          beam.userData.originalScale.y * 1.4,
+          beam.userData.originalScale.z * 1.5
+        ) : beam.userData.originalScale.clone();
+      
+      // Move toward user when highlighted
+      const moveAmount = highlight ? 0.2 : 0;
+      const directionToUser = new THREE.Vector3(0, 0, 1);
+      beam.userData.targetPosition = beam.userData.originalPosition.clone()
+        .add(directionToUser.multiplyScalar(moveAmount));
+    }
+    
+    function updateAnimations(time) {
+      const delta = time - lastTime;
+      lastTime = time;
+      
+      // Smooth animation speed
+      const speed = 0.1;
+      
+      // Update all animating beams
+      animatingBeams.forEach(index => {
+        const beam = beams[index];
         
-        // Move slightly toward user
-        const moveAmount = 0.1;
-        const directionToUser = new THREE.Vector3(0, 0, 1);
-        beam.position.copy(beam.userData.originalPosition)
-          .add(directionToUser.multiplyScalar(moveAmount));
-      } else {
-        // Reset to original size and position
-        beam.scale.copy(beam.userData.originalScale);
-        beam.position.copy(beam.userData.originalPosition);
-      }
+        // Animate scale with smoothing
+        if (beam.userData.targetScale) {
+          beam.scale.lerp(beam.userData.targetScale, speed);
+          
+          // Stop animation if close enough
+          if (beam.scale.distanceTo(beam.userData.targetScale) < 0.01) {
+            if (!beam.userData.highlighted) {
+              animatingBeams.delete(index);
+            }
+          }
+        }
+        
+        // Animate position with smoothing
+        if (beam.userData.targetPosition) {
+          beam.position.lerp(beam.userData.targetPosition, speed);
+        }
+      });
     }
 
     function startXR(){
@@ -216,6 +277,15 @@
       setupController();
       createBeams();
       
+      // Enable video play on first user interaction
+      session.addEventListener('select', () => {
+        videos.forEach(video => {
+          if (video.paused) {
+            video.play().catch(e => console.log('Video play on select:', e));
+          }
+        });
+      }, { once: true });
+      
       renderer.setAnimationLoop(render);
       
       session.addEventListener('end', () => {
@@ -229,10 +299,21 @@
       });
     }
 
-    function render() {
+    function render(time) {
       if (controller) {
         checkIntersections();
       }
+      
+      // Update beam animations
+      updateAnimations(time);
+      
+      // Update video textures
+      videoTextures.forEach((texture, i) => {
+        if (videos[i].readyState >= 2 && videos[i].currentTime > 0) { // HAVE_CURRENT_DATA
+          texture.needsUpdate = true;
+        }
+      });
+      
       renderer.render(scene, camera);
     }
 
